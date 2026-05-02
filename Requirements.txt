@@ -1,0 +1,17 @@
+# FFmpeg Converter GUI v2.6 - Python Dependencies
+# Install with: pip install -r Requirements.txt
+
+# ---- Runtime ----
+PySide6>=6.5         # Qt for Python (LGPL) - GUI framework
+psutil>=5.9          # Process management (graceful ffmpeg shutdown,
+                     # children-kill fallback on Windows)
+
+# ---- Build-time only (uncomment if you want to build a standalone EXE) ----
+# nuitka>=2.0        # Python -> C compiler for standalone Windows EXE
+# ordered-set        # Nuitka dependency
+# zstandard          # Nuitka dependency (faster onefile compression)
+
+# ---- External binaries (NOT installable via pip) ----
+# FFmpeg 8.0 or newer  -- must be in system PATH or next to the EXE.
+#                         Download: https://ffmpeg.org/download.html
+# ffprobe 8.0 or newer -- ships with FFmpeg.
