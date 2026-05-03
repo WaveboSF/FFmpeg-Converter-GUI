@@ -1038,10 +1038,6 @@ class RemuxDialog(QDialog):
         super().__init__(parent)
         self.parent_gui = parent
         self.setWindowTitle("Remux MKV → MP4")
-        # Mit der ScrollArea (v3.0.4) darf der Dialog deutlich kompakter sein:
-        # bei wenigen Tracks zeigt er alles ohne Scrollbar, bei vielen Tracks
-        # erscheint die Scrollbar und die Buttons bleiben unten sichtbar.
-        # Frueher: Mindesthoehe 520 / Default 600.
         self.setMinimumSize(820, 480)
         self.resize(880, 600)
 
@@ -1052,6 +1048,13 @@ class RemuxDialog(QDialog):
         #                 'language': str, 'enabled': bool}
         self.external_audio_files = []
         self.external_subtitle_files = []
+
+        # Eigener Source-Pfad-Cache - unabhaengig von p.input_line.
+        # p.input_line gehoert dem Hauptfenster und kann sich durch
+        # Hintergrund-Threads aendern. Wir merken uns den Pfad selbst,
+        # damit das Deaktivieren der Video-Checkbox keine Signal-Kaskade
+        # ausloest, die den Quellpfad "vergisst".
+        self._source_path: str = parent.input_line.text().strip()
 
         self._build_ui()
         self._populate_from_parent()
@@ -1148,11 +1151,42 @@ class RemuxDialog(QDialog):
         streams_layout.setContentsMargins(10, 10, 10, 10)
         streams_layout.setSpacing(6)
 
-        # 4a. Video-Zeile
-        self.video_label = QLabel()
-        self.video_label.setTextFormat(Qt.TextFormat.RichText)
-        self.video_label.setWordWrap(True)
-        streams_layout.addWidget(self.video_label)
+        # 4a. Video-Zeile mit Include-Checkbox
+        self.include_video_checkbox = QCheckBox("Include Video")
+        self.include_video_checkbox.setChecked(True)
+        self.include_video_checkbox.setToolTip(
+            "Include the video stream in the output.\n"
+            "Uncheck to extract audio only — output extension changes to .mka."
+        )
+        self.include_video_checkbox.stateChanged.connect(self._on_include_video_changed)
+        streams_layout.addWidget(self.include_video_checkbox)
+
+        # 4a2. Audio-Output-Format (nur sichtbar wenn Video deaktiviert)
+        self.audio_format_row = QWidget()
+        audio_format_layout = QHBoxLayout(self.audio_format_row)
+        audio_format_layout.setContentsMargins(20, 0, 0, 0)
+        audio_format_layout.setSpacing(8)
+        audio_format_layout.addWidget(QLabel("Audio output format:"))
+        self.audio_format_combo = QComboBox()
+        self.audio_format_combo.addItems([
+            "Copy (keep original codec)",
+            "FLAC  (lossless)",
+            "MP3  (lossy, universal)",
+            "AAC  (lossy, good quality)",
+        ])
+        self.audio_format_combo.setToolTip(
+            "Copy: fastest, no quality loss — but requires a compatible player.\n"
+            "FLAC: lossless transcode, supported everywhere (foobar2000, VLC, etc.).\n"
+            "MP3:  lossy, maximum compatibility.\n"
+            "AAC:  lossy, good quality, works on Apple devices."
+        )
+        self.audio_format_combo.currentIndexChanged.connect(self._on_audio_format_changed)
+        audio_format_layout.addWidget(self.audio_format_combo)
+        audio_format_layout.addStretch()
+        self.audio_format_row.setVisible(False)   # erst sichtbar wenn Video deaktiviert
+        # NOTE: streams_layout.addWidget(self.audio_format_row) wird WEITER UNTEN
+        #       eingefuegt — direkt nach der Audio-Sektion, damit das Format-Dropdown
+        #       UNTER den Audio-Tracks erscheint (nicht darueber).
 
         # 4b. Audio Section: Header mit Select-All/None Buttons + Track-Liste
         audio_header_row = QHBoxLayout()
@@ -1199,6 +1233,10 @@ class RemuxDialog(QDialog):
         audio_add_row.addWidget(self.audio_add_external_btn)
         audio_add_row.addStretch()
         streams_layout.addLayout(audio_add_row)
+
+        # Audio output format-Dropdown UNTER der Audio-Sektion einbinden
+        # (nur sichtbar wenn Video deaktiviert ist — gilt fuer alle Audio-Tracks zusammen).
+        streams_layout.addWidget(self.audio_format_row)
 
         # 4c. Subtitle Section
         sub_header_row = QHBoxLayout()
@@ -1263,7 +1301,7 @@ class RemuxDialog(QDialog):
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("<b>Output:</b>"))
         self.output_line = QLineEdit()
-        self.output_line.setPlaceholderText("Output path (.mp4)")
+        self.output_line.setPlaceholderText("Output path (.mp4 / .mka for audio-only)")
         out_row.addWidget(self.output_line, 1)
         self.out_browse_btn = QPushButton("Browse…")
         self.out_browse_btn.setMaximumWidth(90)
@@ -1356,7 +1394,11 @@ class RemuxDialog(QDialog):
         neue Source eine andere Duration hat).
         """
         p = self.parent_gui
-        input_path = p.input_line.text().strip()
+        # Eigenen Cache aktualisieren wenn parent einen gueltigen Pfad hat
+        candidate = p.input_line.text().strip()
+        if candidate and os.path.isfile(candidate):
+            self._source_path = candidate
+        input_path = self._source_path
 
         if not input_path or not os.path.isfile(input_path):
 
@@ -1364,7 +1406,9 @@ class RemuxDialog(QDialog):
                 "<i>(no file loaded — click the diagram or Browse to select)</i>"
             )
             self.source_path_label.setStyleSheet("color: #555;")
-            self.video_label.setText("<i>—</i>")
+            self.include_video_checkbox.setText("Include Video")
+            self.include_video_checkbox.setChecked(True)
+            self.apple_compat_checkbox.setEnabled(True)
             self.start_btn.setEnabled(False)
             self.output_line.clear()
             # Stream-Layouts leeren und Hint-Labels einfuegen
@@ -1397,17 +1441,27 @@ class RemuxDialog(QDialog):
         self.source_path_label.setStyleSheet("color: #222;")
 
         # Output-Pfad vorschlagen: gleicher Ordner, gleicher Name, .mp4-Endung
+        # blockSignals verhindert textChanged → _update_workflow_diagram waehrend
+        # _populate_from_parent noch laeuft (Signal-Kaskade).
         base, _ = os.path.splitext(input_path)
+        self.output_line.blockSignals(True)
         self.output_line.setText(base + ".mp4")
+        self.output_line.blockSignals(False)
 
-        # Video-Stream
+        # Video-Stream — Checkbox-Text mit Stream-Info befuellen und Reset.
+        # blockSignals verhindert stateChanged → _on_include_video_changed
+        # waehrend populate laeuft (wuerde output-Extension zuruecksetzen).
         codec_disp = p.input_video_codec.upper() if p.input_video_codec != 'unknown' else 'Unknown'
         res_disp = f"{p.input_width}×{p.input_height}" if p.input_width > 0 else "?"
         bitrate_disp = f"{p.input_source_bitrate:.2f} Mbps" if p.input_source_bitrate > 0 else "? Mbps"
-        self.video_label.setText(
-            f"<b>Video:</b> {codec_disp}, {res_disp}, {bitrate_disp} "
-            f"<span style='color: #888;'>— copied 1:1 (DV/HDR preserved)</span>"
+        self.include_video_checkbox.blockSignals(True)
+        self.include_video_checkbox.setText(
+            f"Include Video  ({codec_disp}, {res_disp}, {bitrate_disp} — copied 1:1, DV/HDR preserved)"
         )
+        self.include_video_checkbox.setChecked(True)
+        self.include_video_checkbox.blockSignals(False)
+        self.audio_format_row.setVisible(False)   # Reset: kein Audio-only-Modus
+        self.apple_compat_checkbox.setEnabled(True)
 
         # Audio + Subtitles als Checkboxen
         self._populate_audio_checkboxes(p.audio_streams, p.atmos_stream_indices)
@@ -1896,6 +1950,9 @@ class RemuxDialog(QDialog):
         """
         p = self.parent_gui
 
+        # Eigenen Cache sofort setzen - nicht erst nach ffprobe
+        self._source_path = filepath
+
         # parent.input_line setzen ohne textChanged-Re-Trigger
         p.input_line.blockSignals(True)
         p.input_line.setText(filepath)
@@ -1973,8 +2030,8 @@ class RemuxDialog(QDialog):
         self.sub_all_btn.setEnabled(False)
         self.sub_none_btn.setEnabled(False)
 
-        # Video Label
-        self.video_label.setText("<i>Loading video info…</i>")
+        # Video Checkbox
+        self.include_video_checkbox.setText("Include Video  (loading…)")
 
         # Hide TrueHD warning (will be re-set if needed after probe)
         self.truehd_warning_label.hide()
@@ -1985,18 +2042,32 @@ class RemuxDialog(QDialog):
     def _browse_output(self):
         current = self.output_line.text() or os.path.expanduser("~")
         init_dir = os.path.dirname(current) if current else os.path.expanduser("~")
+        audio_only = not self.include_video_checkbox.isChecked()
+        if audio_only:
+            ext = self._audio_only_extension()
+            filter_map = {
+                ".mka":  "Matroska Audio (*.mka);;All Files (*.*)",
+                ".flac": "FLAC Audio (*.flac);;All Files (*.*)",
+                ".mp3":  "MP3 Audio (*.mp3);;All Files (*.*)",
+                ".m4a":  "AAC Audio (*.m4a);;All Files (*.*)",
+            }
+            file_filter = filter_map.get(ext, "Audio Files (*.*)")
+            default_ext = ext
+        else:
+            file_filter = "MP4 Files (*.mp4);;All Files (*.*)"
+            default_ext = ".mp4"
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Select Output File", init_dir, "MP4 Files (*.mp4)"
+            self, "Select Output File", init_dir, file_filter
         )
         if filename:
-            if not filename.lower().endswith('.mp4'):
-                filename += '.mp4'
+            if not filename.lower().endswith(default_ext):
+                filename += default_ext
             self.output_line.setText(filename)
 
     def _on_start_clicked(self):
         """Sammelt Settings, baut Remux-Befehl, triggert process_single_file im parent."""
         p = self.parent_gui
-        input_path = p.input_line.text().strip()
+        input_path = self._source_path
         output_path = self.output_line.text().strip()
 
         if not input_path or not os.path.isfile(input_path):
@@ -2012,6 +2083,16 @@ class RemuxDialog(QDialog):
         enabled_ext_audio = [e for e in self.external_audio_files if e.get("enabled")]
         enabled_ext_subs = [e for e in self.external_subtitle_files if e.get("enabled")]
         total_audio_count = len(selected_audio) + len(enabled_ext_audio)
+        include_video = self.include_video_checkbox.isChecked()
+
+        # Nichts ausgewaehlt → leere Ausgabedatei verhindern
+        if not include_video and total_audio_count == 0:
+            QMessageBox.critical(
+                self, "Nothing Selected",
+                "Video is excluded and no audio tracks are selected.\n"
+                "The output would be empty — please include at least one stream."
+            )
+            return
 
         if (self.audio_track_checkboxes or self.external_audio_files) and total_audio_count == 0:
             reply = QMessageBox.question(
@@ -2095,6 +2176,111 @@ class RemuxDialog(QDialog):
         """
         self._set_dialog_busy(False)
 
+    def _on_include_video_changed(self, state):
+        """
+        Reagiert wenn der User Video ein-/ausschliesst.
+        - Schaltet apple_compat_checkbox grau wenn kein Video
+          (hvc1-Tag macht ohne Video keinen Sinn)
+        - Zeigt/versteckt Audio-Format-Dropdown
+        - Passt Output-Extension an
+        - Aktualisiert Workflow-Diagramm
+        """
+        include = self.include_video_checkbox.isChecked()
+
+        # Apple-Compat ist ohne Video sinnlos → ausgrauen
+        self.apple_compat_checkbox.setEnabled(include)
+
+        # Audio-Format-Dropdown ein-/ausblenden
+        self.audio_format_row.setVisible(not include)
+
+        # Output-Extension automatisch anpassen
+        current_out = self.output_line.text()
+        if current_out:
+            base, _ = os.path.splitext(current_out)
+            new_ext = ".mp4" if include else self._audio_only_extension()
+            self.output_line.setText(base + new_ext)
+
+        self._update_workflow_diagram()
+
+    def _audio_only_extension(self) -> str:
+        """Gibt die passende Datei-Extension fuer den gewaehlten Audio-Format-Mode zurueck."""
+        idx = self.audio_format_combo.currentIndex()
+        return {
+            0: ".mka",   # Copy — Matroska Audio, alle Codecs
+            1: ".flac",  # FLAC lossless
+            2: ".mp3",   # MP3
+            3: ".m4a",   # AAC
+        }.get(idx, ".mka")
+
+    def _on_audio_format_changed(self, index):
+        """Passt Output-Extension an wenn der User das Audio-Format wechselt."""
+        if self.include_video_checkbox.isChecked():
+            return   # nur relevant im Audio-only-Modus
+        current_out = self.output_line.text()
+        if current_out:
+            base, _ = os.path.splitext(current_out)
+            self.output_line.setText(base + self._audio_only_extension())
+        # Diagramm aktualisieren — Output-Codec haengt vom Format ab
+        self._update_workflow_diagram()
+
+    # ---- Helpers fuer das Workflow-Diagramm --------------------------------
+    # Halten die Codec-/Bitrate-/Channel-Logik an einer Stelle, damit Source-
+    # und Output-Container in _build_live_diagram_widgets schlank bleiben.
+
+    @staticmethod
+    def _format_bitrate_kbps(bit_rate) -> str:
+        """ffprobe 'bit_rate' (str/int, in bit/s) → '640 kbps' oder '' wenn unbekannt."""
+        if not bit_rate:
+            return ""
+        try:
+            kbps = int(bit_rate) // 1000
+        except (ValueError, TypeError):
+            return ""
+        return f"{kbps} kbps" if kbps > 0 else ""
+
+    @staticmethod
+    def _format_channels(channels) -> str:
+        """ffprobe 'channels' (int) → '5.1' / '7.1' / '2.0' / '1.0' / 'Nch'."""
+        if not channels:
+            return ""
+        try:
+            ch = int(channels)
+        except (ValueError, TypeError):
+            return ""
+        return {1: "1.0", 2: "2.0", 6: "5.1", 8: "7.1"}.get(ch, f"{ch}ch")
+
+    def _target_audio_codec(self, source_codec: str) -> str:
+        """Welcher Codec landet im Output? Wenn Video an → immer Copy (Source-Codec).
+        Wenn Video aus → audio_format_combo entscheidet."""
+        if self.include_video_checkbox.isChecked():
+            return source_codec
+        return {
+            0: source_codec,   # Copy — Original-Codec passt durch
+            1: "flac",
+            2: "mp3",
+            3: "aac",
+        }.get(self.audio_format_combo.currentIndex(), source_codec)
+
+    def _target_audio_bitrate_label(self, source_bit_rate) -> str:
+        """Bitrate-Label fuer den Output-Stream.
+        - Copy / Video an: Source-Bitrate kopiert 1:1
+        - FLAC: 'lossless' (Bitrate ist content-abhaengig)
+        - MP3 / AAC: leer (FFmpeg-Default, kein -b:a gesetzt)"""
+        if self.include_video_checkbox.isChecked():
+            return self._format_bitrate_kbps(source_bit_rate)
+        idx = self.audio_format_combo.currentIndex()
+        if idx == 0:   # Copy
+            return self._format_bitrate_kbps(source_bit_rate)
+        if idx == 1:   # FLAC lossless
+            return "lossless"
+        return ""      # MP3/AAC: Encoder-Default, ehrlich nichts behaupten
+
+    @staticmethod
+    def _join_audio_details(parts) -> str:
+        """Baut '(codec, 5.1, 640 kbps)' aus einer Liste — leere Eintraege fliegen raus."""
+        nonempty = [p for p in parts if p]
+        return f"({', '.join(nonempty)})" if nonempty else ""
+
     def _build_remux_command(self, input_path: str, output_path: str,
                              selected_audio_streams, selected_subtitle_streams) -> List[str]:
         """
@@ -2137,8 +2323,9 @@ class RemuxDialog(QDialog):
 
         # ---- Stream-Mapping ----
 
-        # Video: erster Stream aus Input 0
-        cmd.extend(["-map", "0:v:0"])
+        # Video: erster Stream aus Input 0 (nur wenn eingeschlossen)
+        if self.include_video_checkbox.isChecked():
+            cmd.extend(["-map", "0:v:0"])
 
         # Interne Audio
         for stream in selected_audio_streams:
@@ -2165,6 +2352,24 @@ class RemuxDialog(QDialog):
         # mov_text Konvertierung greift sowohl fuer interne als auch externe Subs
         if selected_subtitle_streams or enabled_ext_subs:
             cmd.extend(["-c:s", "mov_text"])
+
+        # Audio-only-Modus: ggf. Audio transkodieren statt kopieren
+        if not self.include_video_checkbox.isChecked():
+            fmt_idx = self.audio_format_combo.currentIndex()
+            audio_codec_map = {
+                0: None,           # Copy — kein Override
+                1: "flac",         # FLAC lossless
+                2: "libmp3lame",   # MP3
+                3: "aac",          # AAC
+            }
+            audio_codec = audio_codec_map.get(fmt_idx)
+            if audio_codec:
+                cmd.extend(["-c:a", audio_codec])
+                # FLAC: FFmpeg dekodiert AC-3/E-AC-3 intern zu 32-bit float.
+                # FLAC-32 wird von den meisten Playern NICHT unterstuetzt → kein Ton.
+                # s32 + bits_per_raw_sample 24 → 24-bit FLAC (lossless, breit unterstuetzt).
+                if audio_codec == "flac":
+                    cmd.extend(["-sample_fmt", "s32", "-bits_per_raw_sample", "24"])
 
         # Apple Compatibility: HEVC tag von "hev1" auf "hvc1" aendern
         # (nur sinnvoll wenn Video tatsaechlich HEVC ist)
@@ -2217,9 +2422,9 @@ class RemuxDialog(QDialog):
             self.diagram_layout.addWidget(loading)
             return
 
-        # Live oder Generic
-        p = self.parent_gui
-        input_path = p.input_line.text().strip()
+        # Live oder Generic — nutzt eigenen Cache statt p.input_line
+        # (p.input_line kann durch Hintergrund-Threads kurz leer sein)
+        input_path = self._source_path
         if input_path and os.path.isfile(input_path):
             self._build_live_diagram_widgets(input_path)
         else:
@@ -2305,8 +2510,11 @@ class RemuxDialog(QDialog):
 
         return frame, inner
 
-    def _make_arrow_widget(self) -> QWidget:
-        """Mittiger Pfeil-Block zwischen Source und Output."""
+    def _make_arrow_widget(self, caption_html: str = "copy<br>(no re-encode)") -> QWidget:
+        """Mittiger Pfeil-Block zwischen Source und Output.
+        caption_html ist die Beschriftung unter dem Pfeil — Default ist Remux-Modus.
+        Bei Audio-Transcode (Video aus + Format != Copy) liefert der Caller etwas wie
+        'extract<br>+ re-encode' rein."""
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
         v = QVBoxLayout(wrapper)
@@ -2319,7 +2527,7 @@ class RemuxDialog(QDialog):
             "font-size: 28pt; color: #4CAF50; background: transparent; border: none;"
         )
         v.addWidget(arrow)
-        cap = QLabel("copy<br>(no re-encode)")
+        cap = QLabel(caption_html)
         cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cap.setStyleSheet(
             "font-size: 9pt; color: #555; background: transparent; border: none;"
@@ -2356,8 +2564,13 @@ class RemuxDialog(QDialog):
             tags = stream.get('tags', {})
             lang = tags.get('language', 'und').upper()
             codec = stream.get('codec_name', '?').lower()
+            details = self._join_audio_details([
+                codec,
+                self._format_channels(stream.get('channels')),
+                self._format_bitrate_kbps(stream.get('bit_rate')),
+            ])
             src_inner.addWidget(self._make_stream_item(
-                f"#{idx} {lang} ({codec})", 'audio', cb.isChecked(), self._browse_source
+                f"#{idx} {lang} {details}", 'audio', cb.isChecked(), self._browse_source
             ))
 
 
@@ -2397,16 +2610,20 @@ class RemuxDialog(QDialog):
         )
         out_frame.setToolTip("Click to choose a different output path")
 
-        # Video (mit ggf. Apple-Tag)
-        apple_tag = ""
-        if (self.apple_compat_checkbox.isChecked()
-                and p.input_video_codec == 'h265'):
-            apple_tag = " + hvc1"
-        out_inner.addWidget(self._make_stream_item(
-            f"Video ({codec_disp}){apple_tag}", 'video', True, self._browse_output
-        ))
+        # Video — nur wenn aktiviert, sonst komplett aus dem Output raus
+        # (ohne Video ist der Apple-hvc1-Tag automatisch egal — er wird im
+        # _build_remux_command sowieso nur bei eingeschlossenem H265 gesetzt).
+        video_included = self.include_video_checkbox.isChecked()
+        if video_included:
+            apple_tag = ""
+            if (self.apple_compat_checkbox.isChecked()
+                    and p.input_video_codec == 'h265'):
+                apple_tag = " + hvc1"
+            out_inner.addWidget(self._make_stream_item(
+                f"Video ({codec_disp}){apple_tag}", 'video', True, self._browse_output
+            ))
 
-        # Interne Audio (nur ausgewaehlte)
+        # Interne Audio (nur ausgewaehlte) — Codec/Bitrate spiegeln Target wider
         n_audio = 0
         for cb, stream in self.audio_track_checkboxes:
             if not cb.isChecked():
@@ -2415,9 +2632,15 @@ class RemuxDialog(QDialog):
             idx = stream.get('index', '?')
             tags = stream.get('tags', {})
             lang = tags.get('language', 'und').upper()
-            codec = stream.get('codec_name', '?').lower()
+            src_codec = stream.get('codec_name', '?').lower()
+            target_codec = self._target_audio_codec(src_codec)
+            details = self._join_audio_details([
+                target_codec,
+                self._format_channels(stream.get('channels')),
+                self._target_audio_bitrate_label(stream.get('bit_rate')),
+            ])
             out_inner.addWidget(self._make_stream_item(
-                f"#{idx} {lang} ({codec})", 'audio', True, self._browse_output
+                f"#{idx} {lang} {details}", 'audio', True, self._browse_output
             ))
 
 
@@ -2428,7 +2651,8 @@ class RemuxDialog(QDialog):
             short_name = os.path.basename(entry["path"])
             if len(short_name) > 22:
                 short_name = short_name[:10] + "…" + short_name[-10:]
-            label = f"ext: {short_name} ({entry['codec']})"
+            target_codec = self._target_audio_codec(entry['codec'])
+            label = f"ext: {short_name} ({target_codec})"
             out_inner.addWidget(self._make_stream_item(
                 label, 'audio', True, self._browse_output
             ))
@@ -2466,9 +2690,20 @@ class RemuxDialog(QDialog):
             )
             out_inner.addWidget(no_audio)
 
+        # Pfeil-Caption haengt vom Modus ab:
+        #   - Video an  → Remux (alles copy)
+        #   - Video aus + Copy → Audio extrahieren, kein Re-encode
+        #   - Video aus + FLAC/MP3/AAC → Audio extrahieren UND re-encoden
+        if video_included:
+            arrow_caption = "copy<br>(no re-encode)"
+        elif self.audio_format_combo.currentIndex() == 0:
+            arrow_caption = "extract audio<br>(no re-encode)"
+        else:
+            arrow_caption = "extract audio<br>+ re-encode"
+
         # Layout zusammenbauen
         self.diagram_layout.addWidget(src_frame, 0, Qt.AlignmentFlag.AlignTop)
-        self.diagram_layout.addWidget(self._make_arrow_widget(), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.diagram_layout.addWidget(self._make_arrow_widget(arrow_caption), 0, Qt.AlignmentFlag.AlignVCenter)
         self.diagram_layout.addWidget(out_frame, 0, Qt.AlignmentFlag.AlignTop)
         self.diagram_layout.addStretch(1)
 
@@ -5550,8 +5785,8 @@ class FFmpegGUI(QMainWindow):
 
             self.set_inputs_enabled(False)
         
-        if not output_path or not any(output_path.lower().endswith(ext) for ext in ['.mkv', '.mp4']):
-            error_msg = f"Invalid or missing output file name:\n\n{output_path}\n\nPlease ensure the output file has a valid extension (.mkv or .mp4)."
+        if not output_path or not any(output_path.lower().endswith(ext) for ext in ['.mkv', '.mp4', '.mka', '.flac', '.mp3', '.m4a']):
+            error_msg = f"Invalid or missing output file name:\n\n{output_path}\n\nPlease ensure the output file has a valid extension (.mkv, .mp4, .mka, .flac, .mp3, or .m4a)."
             if is_batch:
                 QMessageBox.critical(self, "Batch Error", error_msg + "\n\nBatch process canceled.")
                 self.reset_ui_after_run()
