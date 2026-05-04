@@ -24,14 +24,31 @@ No more one-size-fits-all 50% default. The recommended bitrate is calculated fro
 
 Quality floors ensure a minimum bitrate per resolution and codec (e.g. AV1 @ 1080p ≥ 2.0 Mbps). The slider is capped at the source bitrate — re-encoding above source quality makes no sense.
 
-### 📦 Remux MKV → MP4 (No Re-Encoding)
-A dedicated dialog for pure container conversion:
-- **Zero quality loss** — video stream is copied 1:1
-- **Dolby Vision & HDR metadata preserved** 100%
+### 📦 Remux MKV → MP4 — A Full Audio Workshop
+
+What started as a pure container conversion has grown into a dedicated dialog that handles **container swaps, audio extraction, format conversion, and multi-channel downmixing** in one place — all driven by a live workflow diagram that updates as you change settings.
+
+**Container Conversion (Zero Quality Loss)**
+- Video stream copied 1:1 — **Dolby Vision & HDR metadata preserved 100%**
 - Per-track audio and subtitle selection with All/None helper
-- External audio/subtitle files can be added as extra inputs
+- External audio/subtitle files can be added as extra inputs (multi-input merge)
 - Apple compatibility toggle (`hvc1` tag for QuickTime/Apple TV)
-- Live workflow diagram that adapts to the loaded streams
+- Live workflow diagram with click-to-browse on every stream
+
+**Audio-Only Extraction**
+- Untick *Include Video* → the dialog turns into an audio extractor
+- Output formats: **Copy** (`.mka`), **FLAC 24-bit lossless**, **MP3**, **AAC**
+- Output extension auto-adjusts to the chosen format
+- FFmpeg's filter chain runs in 32-bit float internally — no precision loss in the decode/encode round-trip beyond what the source codec already discarded
+
+**Multi-Channel Downmix (5.1/7.1 → Stereo, 7.1 → 5.1)**
+- Explicit ITU-R BS.775 weighted mix via FFmpeg's `pan` filter — *not* the conservative built-in `-ac N` path that makes downmixes sound thin and quiet
+- **Music mode** *(default)* — full mix with LFE preserved at −3 dB, Center and Surrounds at −3 dB. Best for surround-music releases (Blu-ray Audio, SACD rips)
+- **Movie mode** — cinema-balanced: Center −3 dB, Surrounds −6 dB, LFE −10 dB. Preserves dialogue clarity, keeps action-bass under control
+- Per-track logic: only tracks whose source channels exceed the target are re-encoded — stereo tracks in the same selection stay as Copy
+- Bitrate cap = `min(codec_max, source_bitrate)` — uses the codec's maximum but never exceeds source (no wasted bits, no second lossy quality drop)
+- Mode selection persists across sessions
+- Smart hint: when Music mode + Copy + lossy source, the GUI suggests switching to FLAC to avoid double-lossy encoding
 
 ### 🎵 Dolby Atmos Auto-Protection
 Atmos tracks are automatically detected and handled safely during re-encoding — no accidental downmix.
@@ -171,7 +188,7 @@ ffmpeg-converter-gui/
 | [Changelog.md](Changelog.md) | Full version history with all changes |
 | [Dolby_Atmos_Feature_Documentation.md](Dolby_Atmos_Feature_Documentation.md) | Technical details on Atmos handling |
 | [Atmos_Quick_Start.md](Atmos_Quick_Start.md) | User-friendly Atmos guide |
-| [Remux_Documentation.md](Remux_Documentation.md) | MKV → MP4 remux workflow |
+| [Remux_Documentation.md](Remux_Documentation.md) | MKV → MP4 remux, audio extraction & downmix workflow |
 | [NUITKA_BUILD_GUIDE.md](NUITKA_BUILD_GUIDE.md) | How to compile a standalone EXE |
 
 ---
