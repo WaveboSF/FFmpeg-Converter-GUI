@@ -89,6 +89,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QProgressBar,
     QCheckBox,
+    QRadioButton,
+    QButtonGroup,
     QSpacerItem,
     QSizePolicy,
 
@@ -1038,8 +1040,10 @@ class RemuxDialog(QDialog):
         super().__init__(parent)
         self.parent_gui = parent
         self.setWindowTitle("Remux MKV → MP4")
-        self.setMinimumSize(820, 480)
-        self.resize(880, 600)
+        # Downmix-Row + Tip-Zeile haben den Streams-Bereich erweitert; +60-100px
+        # Puffer hier macht den Dialog auch zukunftssicher fuer weitere Audio-Optionen.
+        self.setMinimumSize(820, 580)
+        self.resize(880, 720)
 
         self.audio_track_checkboxes = []  # List of (QCheckBox, stream_dict)
         self.subtitle_track_checkboxes = []  # List of (QCheckBox, stream_dict)
@@ -1237,6 +1241,96 @@ class RemuxDialog(QDialog):
         # Audio output format-Dropdown UNTER der Audio-Sektion einbinden
         # (nur sichtbar wenn Video deaktiviert ist — gilt fuer alle Audio-Tracks zusammen).
         streams_layout.addWidget(self.audio_format_row)
+
+        # 4a3. Downmix-Row — IMMER sichtbar, auch wenn Video aktiv ist.
+        # Disabled wenn keine Multichannel-Tracks in der aktuellen Auswahl sind.
+        # Affiziert nur Tracks, deren Source-Channels > Target — andere bleiben Copy.
+        self.downmix_row = QWidget()
+        downmix_layout = QHBoxLayout(self.downmix_row)
+        downmix_layout.setContentsMargins(20, 0, 0, 0)
+        downmix_layout.setSpacing(8)
+        self.downmix_checkbox = QCheckBox("Downmix audio to:")
+        self.downmix_checkbox.setToolTip(
+            "Downmix multi-channel tracks to the selected target.\n"
+            "Tracks already at or below the target are kept as-is."
+        )
+        self.downmix_checkbox.toggled.connect(self._on_downmix_changed)
+        self.downmix_checkbox.setEnabled(False)   # bleibt disabled bis Multichannel erkannt
+        self.downmix_checkbox.setToolTip(
+            "No file loaded — load a source first."
+        )
+        downmix_layout.addWidget(self.downmix_checkbox)
+        self.downmix_target_combo = QComboBox()
+        # itemData haelt die Ziel-Kanalzahl als int — damit muss der Code die
+        # Strings nirgends parsen.
+        self.downmix_target_combo.addItem("2.0 (Stereo)", 2)
+        self.downmix_target_combo.addItem("5.1", 6)
+        self.downmix_target_combo.setToolTip(
+            "Target channel layout.\n"
+            "5.1 is only selectable if at least one source track has more than 6 channels."
+        )
+        self.downmix_target_combo.currentIndexChanged.connect(self._on_downmix_changed)
+        self.downmix_target_combo.setEnabled(False)   # bis Checkbox an UND multichannel
+        downmix_layout.addWidget(self.downmix_target_combo)
+
+        # Music/Movie-Modus — beeinflusst die Mix-Koeffizienten:
+        #   Music: voller ITU-R BS.775-Mix mit LFE (Bass-Erhalt fuer 5.1-Musik)
+        #   Movie: konservativer Mix, Surrounds -6dB, LFE -10dB (Dialog-Klarheit)
+        # Default ist Music — viele User remuxen Music-Files, und der Music-Mix
+        # ist auch fuer Filmmaterial weniger schlimm als andersrum.
+        downmix_layout.addSpacing(12)
+        self.downmix_mode_label = QLabel("Optimize for:")
+        self.downmix_mode_label.setEnabled(False)
+        downmix_layout.addWidget(self.downmix_mode_label)
+        self.downmix_mode_music = QRadioButton("Music")
+        self.downmix_mode_music.setToolTip(
+            "Full ITU-R BS.775 weighted mix with LFE preserved (-3 dB).\n"
+            "Best for stereo downmix of multi-channel music releases —\n"
+            "keeps bass energy and full dynamics. May feel busy on movies."
+        )
+        self.downmix_mode_movie = QRadioButton("Movie")
+        self.downmix_mode_movie.setToolTip(
+            "Conservative cinema downmix:\n"
+            "  • Center -3 dB (dialogue clarity)\n"
+            "  • Surrounds -6 dB (effects pulled back)\n"
+            "  • LFE -10 dB (controlled bass, no rumble blowout)"
+        )
+        self.downmix_mode_group = QButtonGroup(self.downmix_row)
+        self.downmix_mode_group.addButton(self.downmix_mode_music)
+        self.downmix_mode_group.addButton(self.downmix_mode_movie)
+        # Default-Mode aus parent_gui (in Settings persistiert) — Music ist
+        # der Initial-Default beim allerersten Start.
+        last_mode = getattr(self.parent_gui, 'last_downmix_mode', 'music')
+        if last_mode == 'movie':
+            self.downmix_mode_movie.setChecked(True)
+        else:
+            self.downmix_mode_music.setChecked(True)
+        self.downmix_mode_music.setEnabled(False)
+        self.downmix_mode_movie.setEnabled(False)
+        self.downmix_mode_music.toggled.connect(self._on_downmix_changed)
+        self.downmix_mode_movie.toggled.connect(self._on_downmix_changed)
+        downmix_layout.addWidget(self.downmix_mode_music)
+        downmix_layout.addWidget(self.downmix_mode_movie)
+        downmix_layout.addStretch()
+        streams_layout.addWidget(self.downmix_row)
+
+        # Tip-Zeile direkt unter der Downmix-Row.
+        # Erscheint nur bei Music-Mode + Audio-Format=Copy + lossy Source —
+        # in dem Fall waere FLAC die bessere Wahl (kein 2. lossy Encode).
+        self.downmix_tip_row = QWidget()
+        tip_layout = QHBoxLayout(self.downmix_tip_row)
+        tip_layout.setContentsMargins(40, 0, 0, 0)
+        tip_layout.setSpacing(4)
+        self.downmix_tip_label = QLabel(
+            "💡 Tip: switch <b>Audio output format</b> to <b>FLAC</b> for "
+            "lossless music quality (avoids second lossy encode)."
+        )
+        self.downmix_tip_label.setStyleSheet("color: #b8860b; font-size: 9pt;")
+        self.downmix_tip_label.setTextFormat(Qt.TextFormat.RichText)
+        tip_layout.addWidget(self.downmix_tip_label)
+        tip_layout.addStretch()
+        self.downmix_tip_row.setVisible(False)   # erst sichtbar wenn relevant
+        streams_layout.addWidget(self.downmix_tip_row)
 
         # 4c. Subtitle Section
         sub_header_row = QHBoxLayout()
@@ -1552,6 +1646,7 @@ class RemuxDialog(QDialog):
             cb.setChecked(should_check)
 
             cb.stateChanged.connect(self._update_workflow_diagram)
+            cb.stateChanged.connect(self._update_downmix_ui_state)
 
             self.audio_track_checkboxes.append((cb, stream))
 
@@ -1757,6 +1852,7 @@ class RemuxDialog(QDialog):
         }
         self.external_audio_files.append(entry)
         self._refresh_external_audio_ui()
+        self._update_downmix_ui_state()
         self._update_workflow_diagram()
         self.parent_gui._update_last_browse_dir(filename)
 
@@ -1816,6 +1912,7 @@ class RemuxDialog(QDialog):
         if kind == "audio" and entry in self.external_audio_files:
             self.external_audio_files.remove(entry)
             self._refresh_external_audio_ui()
+            self._update_downmix_ui_state()
         elif kind == "subtitle" and entry in self.external_subtitle_files:
             self.external_subtitle_files.remove(entry)
             self._refresh_external_sub_ui()
@@ -1888,6 +1985,7 @@ class RemuxDialog(QDialog):
         """Externe Checkbox getoggled."""
         entry["enabled"] = bool(state)
         self._update_workflow_diagram()
+        self._update_downmix_ui_state()
 
     def _refresh_external_audio_ui(self):
         """External-Audio-Liste neu aufbauen."""
@@ -1998,11 +2096,13 @@ class RemuxDialog(QDialog):
                 "(no readable duration, fps, or streams)."
             )
             self._populate_from_parent()
+            self._update_downmix_ui_state()
             self._update_workflow_diagram()
             return
 
         # Repopulate aus dem nun aktuellen parent-State
         self._populate_from_parent()
+        self._update_downmix_ui_state()
         self._update_workflow_diagram()
 
     def _show_streams_loading(self):
@@ -2200,6 +2300,8 @@ class RemuxDialog(QDialog):
             new_ext = ".mp4" if include else self._audio_only_extension()
             self.output_line.setText(base + new_ext)
 
+        # Tip-Empfehlung haengt davon ab ob wir im Audio-only-Modus sind
+        self._update_downmix_tip_visibility()
         self._update_workflow_diagram()
 
     def _audio_only_extension(self) -> str:
@@ -2215,12 +2317,14 @@ class RemuxDialog(QDialog):
     def _on_audio_format_changed(self, index):
         """Passt Output-Extension an wenn der User das Audio-Format wechselt."""
         if self.include_video_checkbox.isChecked():
+            self._update_downmix_tip_visibility()   # auch hier — falls relevant geworden
             return   # nur relevant im Audio-only-Modus
         current_out = self.output_line.text()
         if current_out:
             base, _ = os.path.splitext(current_out)
             self.output_line.setText(base + self._audio_only_extension())
-        # Diagramm aktualisieren — Output-Codec haengt vom Format ab
+        # Diagramm + Tip aktualisieren — Output-Codec haengt vom Format ab
+        self._update_downmix_tip_visibility()
         self._update_workflow_diagram()
 
     # ---- Helpers fuer das Workflow-Diagramm --------------------------------
@@ -2249,11 +2353,265 @@ class RemuxDialog(QDialog):
             return ""
         return {1: "1.0", 2: "2.0", 6: "5.1", 8: "7.1"}.get(ch, f"{ch}ch")
 
-    def _target_audio_codec(self, source_codec: str) -> str:
-        """Welcher Codec landet im Output? Wenn Video an → immer Copy (Source-Codec).
-        Wenn Video aus → audio_format_combo entscheidet."""
+    @staticmethod
+    def _join_audio_details(parts) -> str:
+        """Baut '(codec, 5.1, 640 kbps)' aus einer Liste — leere Eintraege fliegen raus."""
+        nonempty = [p for p in parts if p]
+        return f"({', '.join(nonempty)})" if nonempty else ""
+
+    def _on_downmix_changed(self):
+        """User hat Downmix-Checkbox oder -Target geaendert → Combo-Enable + Diagramm refreshen."""
+        # Target-Combo nur enablen wenn Checkbox an UND mindestens ein passender Track
+        # in der Auswahl ist.
+        self._update_downmix_ui_state()
+        # Mode-Wahl in parent_gui spiegeln, damit der naechste Save-Settings sie persistiert.
+        self.parent_gui.last_downmix_mode = self._downmix_mode()
+        self._update_workflow_diagram()
+
+    def _update_downmix_ui_state(self):
+        """Aktiviert/deaktiviert Downmix-Checkbox + Target-Combo basierend auf
+        den aktuell ausgewaehlten Audio-Tracks. Wird aufgerufen bei Track-Toggle,
+        File-Load und Downmix-Aenderung."""
+        if not hasattr(self, "downmix_checkbox"):
+            return   # UI ist noch nicht initialisiert
+        max_ch = self._max_selected_audio_channels()
+        # Checkbox: nur enablen wenn es ueberhaupt was downzumixen gibt
+        any_multichannel = max_ch > 2
+        self.downmix_checkbox.setEnabled(any_multichannel)
+        if not any_multichannel:
+            self.downmix_checkbox.setToolTip(
+                "No multi-channel audio in current selection — nothing to downmix."
+            )
+        else:
+            self.downmix_checkbox.setToolTip(
+                "Downmix multi-channel tracks to the selected target.\n"
+                "Tracks already at or below the target are kept as-is."
+            )
+        # Target-Combo: enablen wenn Checkbox an (und enabled)
+        target_enabled = any_multichannel and self.downmix_checkbox.isChecked()
+        self.downmix_target_combo.setEnabled(target_enabled)
+        # Mode-Radios + Label: gleicher Enable-State wie der Target-Combo —
+        # ohne aktiven Downmix sind die Optionen sinnlos.
+        if hasattr(self, "downmix_mode_music"):
+            self.downmix_mode_label.setEnabled(target_enabled)
+            self.downmix_mode_music.setEnabled(target_enabled)
+            self.downmix_mode_movie.setEnabled(target_enabled)
+        # Tip-Zeile: nur sichtbar wenn Music-Mode aktiv UND
+        # Audio-Format=Copy UND mindestens ein lossy Multichannel-Source-Track.
+        # Bei FLAC-Format ist die Empfehlung schon erfuellt; bei Copy + AC-3 5.1
+        # Source wuerden wir AC-3 Stereo erzeugen (lossy×lossy) — Hinweis auf FLAC.
+        self._update_downmix_tip_visibility()
+        # 5.1-Eintrag im Combo nur dann waehlbar wenn Source > 6 Kanaele (also 7.1)
+        # Qt erlaubt das via Item-Flags am Model.
+        model = self.downmix_target_combo.model()
+        for i in range(self.downmix_target_combo.count()):
+            item = model.item(i)
+            if item is None:
+                continue
+            target_ch = self.downmix_target_combo.itemData(i)
+            # Item ist usable wenn max_ch echt groesser als das Target
+            usable = (target_ch is not None) and (max_ch > target_ch)
+            flags = item.flags()
+            if usable:
+                item.setFlags(flags | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            else:
+                item.setFlags(flags & ~Qt.ItemFlag.ItemIsEnabled & ~Qt.ItemFlag.ItemIsSelectable)
+        # Falls die aktuelle Auswahl nicht mehr usable ist → auf 2.0 zurueckfallen
+        cur_target = self.downmix_target_combo.currentData()
+        if cur_target is not None and max_ch <= cur_target:
+            # 2.0-Index suchen (= channels 2)
+            for i in range(self.downmix_target_combo.count()):
+                if self.downmix_target_combo.itemData(i) == 2:
+                    self.downmix_target_combo.setCurrentIndex(i)
+                    break
+
+    def _max_selected_audio_channels(self) -> int:
+        """Hoechste Kanalzahl unter den aktuell angehakten Audio-Tracks
+        (intern + extern). 0 wenn nichts ausgewaehlt."""
+        max_ch = 0
+        for cb, stream in self.audio_track_checkboxes:
+            if not cb.isChecked():
+                continue
+            try:
+                ch = int(stream.get('channels') or 0)
+                if ch > max_ch:
+                    max_ch = ch
+            except (ValueError, TypeError):
+                pass
+        for entry in self.external_audio_files:
+            if not entry.get('enabled', True):
+                continue
+            try:
+                ch = int(entry.get('channels') or 0)
+                if ch > max_ch:
+                    max_ch = ch
+            except (ValueError, TypeError):
+                pass
+        return max_ch
+
+    def _downmix_active(self) -> bool:
+        """True wenn Downmix-Checkbox an UND aktivierbar (also Multichannel vorhanden)."""
+        if not hasattr(self, "downmix_checkbox"):
+            return False
+        return (self.downmix_checkbox.isChecked()
+                and self.downmix_checkbox.isEnabled())
+
+    def _downmix_mode(self) -> str:
+        """Aktuell gewaehlter Downmix-Mode: 'music' (Default) oder 'movie'."""
+        if not hasattr(self, "downmix_mode_movie"):
+            return "music"
+        return "movie" if self.downmix_mode_movie.isChecked() else "music"
+
+    def _build_downmix_filter(self, source_channels) -> str:
+        """Baut den FFmpeg pan-Filter String fuer den Downmix dieses Tracks.
+
+        Verwendet c0..cN-Channel-Notation statt symbolischer Namen — das ist
+        robust gegen 5.1 vs 5.1(side) Layout-Unterschiede (FL/FR/FC/LFE sind
+        konstant, aber BL/SL koennen je nach Source variieren).
+
+        Channel-Order in FFmpeg ist konsistent:
+          5.1: c0=FL, c1=FR, c2=FC, c3=LFE, c4=Surround-L, c5=Surround-R
+          7.1: c0=FL, c1=FR, c2=FC, c3=LFE, c4=BL, c5=BR, c6=SL, c7=SR
+
+        Mode 'music': vollwertiger ITU-R BS.775-Mix mit LFE bei -3dB
+            (Bass bleibt erhalten, Center -3dB fuer Dialog-Klarheit, Surrounds
+             bei -3dB fuer Raumtiefe). volume=-3dB am Ende als Clipping-Schutz.
+        Mode 'movie': konservativer Cinema-Mix
+            (Center -3dB, Surrounds -6dB damit Effekte nicht ueberlagern,
+             LFE -10dB damit Action-Bass nicht haemmert. Kein extra volume —
+             die niedrigeren Koeffizienten haben schon eingebauten Headroom).
+
+        Returns leeren String wenn kein bekanntes Source→Target-Mapping —
+        Caller faellt dann auf FFmpeg-internes -ac N zurueck.
+        """
+        try:
+            src_ch = int(source_channels) if source_channels else 0
+        except (ValueError, TypeError):
+            src_ch = 0
+        target_ch = self._downmix_target_channels()
+        mode = self._downmix_mode()
+
+        if src_ch == 6 and target_ch == 2:
+            # 5.1 → 2.0
+            if mode == "music":
+                return ("pan=stereo|"
+                        "FL=c0+0.707*c2+0.707*c4+0.707*c3|"
+                        "FR=c1+0.707*c2+0.707*c5+0.707*c3,"
+                        "volume=-3dB")
+            return ("pan=stereo|"
+                    "FL=c0+0.707*c2+0.5*c4+0.316*c3|"
+                    "FR=c1+0.707*c2+0.5*c5+0.316*c3")
+
+        if src_ch == 8 and target_ch == 2:
+            # 7.1 → 2.0 — BL+SL bzw. BR+SR jeweils mit halbem Gewicht
+            # (Sum sollte effektiv ~0.707 ergeben fuer Music, ~0.5 fuer Movie).
+            if mode == "music":
+                return ("pan=stereo|"
+                        "FL=c0+0.707*c2+0.5*c4+0.5*c6+0.707*c3|"
+                        "FR=c1+0.707*c2+0.5*c5+0.5*c7+0.707*c3,"
+                        "volume=-3dB")
+            return ("pan=stereo|"
+                    "FL=c0+0.707*c2+0.354*c4+0.354*c6+0.316*c3|"
+                    "FR=c1+0.707*c2+0.354*c5+0.354*c7+0.316*c3")
+
+        if src_ch == 8 and target_ch == 6:
+            # 7.1 → 5.1 — Genre-unabhaengig (nur Sides → Backs Faltung)
+            return "pan=5.1|FL=c0|FR=c1|FC=c2|LFE=c3|BL=c4+0.707*c6|BR=c5+0.707*c7"
+
+        return ""   # Fallback signalisieren (4.0/3.0/exotic Layouts)
+
+    def _update_downmix_tip_visibility(self):
+        """Tip-Zeile zur FLAC-Empfehlung erscheint nur wenn:
+          - Downmix aktiv UND Music-Mode UND
+          - Audio-Format = Copy (also keine FLAC/AAC/MP3-Auswahl) UND
+          - Mind. ein selektierter Multichannel-Track ist lossy
+            (sonst erzeugt Copy ja keinen 2. lossy Encode).
+        Bei Video-on Mode greift der Format-Combo nicht — dann ist die Empfehlung
+        weniger eindeutig (User will ja Video + Audio in MP4), Tip bleibt aus."""
+        if not hasattr(self, "downmix_tip_row"):
+            return
+        if (not self._downmix_active()
+                or self._downmix_mode() != "music"
+                or self.include_video_checkbox.isChecked()
+                or self.audio_format_combo.currentIndex() != 0):
+            self.downmix_tip_row.setVisible(False)
+            return
+        # Lossy-Source-Check: alle gaengigen lossy Codecs in der Auswahl?
+        lossy = {"ac3", "eac3", "aac", "mp3", "opus", "vorbis"}
+        any_lossy = False
+        for cb, stream in self.audio_track_checkboxes:
+            if not cb.isChecked():
+                continue
+            try:
+                if int(stream.get('channels') or 0) <= 2:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            codec = (stream.get('codec_name') or '').lower()
+            if codec in lossy:
+                any_lossy = True
+                break
+        if not any_lossy:
+            for entry in self.external_audio_files:
+                if not entry.get('enabled', True):
+                    continue
+                try:
+                    if int(entry.get('channels') or 0) <= 2:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                if (entry.get('codec') or '').lower() in lossy:
+                    any_lossy = True
+                    break
+        self.downmix_tip_row.setVisible(any_lossy)
+
+    def _downmix_target_channels(self) -> int:
+        """Int-Kanalzahl des aktuellen Downmix-Targets (2 oder 6). 0 wenn inaktiv."""
+        if not self._downmix_active():
+            return 0
+        data = self.downmix_target_combo.currentData()
+        try:
+            return int(data) if data is not None else 0
+        except (ValueError, TypeError):
+            return 0
+
+    def _track_needs_downmix(self, source_channels) -> bool:
+        """True wenn dieser Track wegen Downmix re-encodet werden muss."""
+        target = self._downmix_target_channels()
+        if target == 0:
+            return False
+        try:
+            ch = int(source_channels or 0)
+        except (ValueError, TypeError):
+            return False
+        return ch > target
+
+    @staticmethod
+    def _downmix_target_bitrate(target_codec: str, source_bit_rate) -> int:
+        """Bitrate fuer den re-encodeten Downmix-Track in bit/s.
+        Regel (User-Vorgabe): Codec-Maximum nehmen, aber nie ueber Source-Bitrate.
+        Returns 0 fuer FLAC (lossless, keine Bitrate) oder bei unbekanntem Codec."""
+        codec_max = {
+            'ac3':  640_000,
+            'eac3': 1_536_000,
+            'aac':  512_000,
+            'mp3':  320_000,
+        }.get((target_codec or '').lower())
+        if codec_max is None:
+            return 0   # FLAC oder unbekannt — kein -b:a setzen
+        try:
+            src = int(source_bit_rate) if source_bit_rate else codec_max
+        except (ValueError, TypeError):
+            src = codec_max
+        return min(codec_max, src) if src > 0 else codec_max
+
+    def _target_audio_codec(self, source_codec: str, source_channels=None) -> str:
+        """Welcher Codec landet im Output?
+        - Video an + kein Downmix → Source-Codec (Copy)
+        - Video an + Downmix fuer DIESEN Track → Source-Codec, aber re-encoded
+        - Video aus → audio_format_combo entscheidet (Copy = Source-Codec)"""
         if self.include_video_checkbox.isChecked():
-            return source_codec
+            return source_codec   # bei Downmix ist's auch Source-Codec, nur re-encoded
         return {
             0: source_codec,   # Copy — Original-Codec passt durch
             1: "flac",
@@ -2261,11 +2619,23 @@ class RemuxDialog(QDialog):
             3: "aac",
         }.get(self.audio_format_combo.currentIndex(), source_codec)
 
-    def _target_audio_bitrate_label(self, source_bit_rate) -> str:
-        """Bitrate-Label fuer den Output-Stream.
+    def _target_audio_bitrate_label(self, source_bit_rate, target_codec=None,
+                                    source_channels=None) -> str:
+        """Bitrate-Label fuer den Output-Stream (fuer das Workflow-Diagramm).
+        - Track wird downgemixt → _downmix_target_bitrate-Resultat als 'XXX kbps'
         - Copy / Video an: Source-Bitrate kopiert 1:1
-        - FLAC: 'lossless' (Bitrate ist content-abhaengig)
-        - MP3 / AAC: leer (FFmpeg-Default, kein -b:a gesetzt)"""
+        - FLAC: 'lossless'
+        - MP3 / AAC ohne Downmix: leer (FFmpeg-Default)"""
+        # Downmix-Fall hat Vorrang — aendert Codec & Bitrate gleichzeitig
+        if self._track_needs_downmix(source_channels):
+            tcodec = target_codec or "ac3"
+            br = self._downmix_target_bitrate(tcodec, source_bit_rate)
+            if tcodec.lower() == "flac":
+                return "lossless"
+            if br > 0:
+                return f"{br // 1000} kbps"
+            return ""
+        # Kein Downmix — wie vorher
         if self.include_video_checkbox.isChecked():
             return self._format_bitrate_kbps(source_bit_rate)
         idx = self.audio_format_combo.currentIndex()
@@ -2275,11 +2645,13 @@ class RemuxDialog(QDialog):
             return "lossless"
         return ""      # MP3/AAC: Encoder-Default, ehrlich nichts behaupten
 
-    @staticmethod
-    def _join_audio_details(parts) -> str:
-        """Baut '(codec, 5.1, 640 kbps)' aus einer Liste — leere Eintraege fliegen raus."""
-        nonempty = [p for p in parts if p]
-        return f"({', '.join(nonempty)})" if nonempty else ""
+    def _target_channel_label(self, source_channels) -> str:
+        """Kanal-Layout-Label fuer den Output-Stream im Diagramm.
+        Wenn dieser Track downgemixt wird, returnt die Target-Channels statt Source."""
+        if self._track_needs_downmix(source_channels):
+            target = self._downmix_target_channels()
+            return self._format_channels(target)
+        return self._format_channels(source_channels)
 
     def _build_remux_command(self, input_path: str, output_path: str,
                              selected_audio_streams, selected_subtitle_streams) -> List[str]:
@@ -2348,28 +2720,111 @@ class RemuxDialog(QDialog):
             cmd.extend(["-map", f"{input_idx}:s:0"])
 
         # ---- Codec-Strategie ----
+        # Globaler Default: alles copy. Audio-only-Modus + bestimmtes Format
+        # setzt den globalen Audio-Codec. Downmix kann das per-Track noch
+        # einmal ueberschreiben (mit Codec, Bitrate, Channel-Anzahl).
         cmd.extend(["-c", "copy"])
         # mov_text Konvertierung greift sowohl fuer interne als auch externe Subs
         if selected_subtitle_streams or enabled_ext_subs:
             cmd.extend(["-c:s", "mov_text"])
 
-        # Audio-only-Modus: ggf. Audio transkodieren statt kopieren
+        # Globaler Audio-Codec (Audio-only-Modus). Pro-Stream-Overrides fuer
+        # Downmix-Tracks kommen weiter unten.
+        global_audio_encoder = None   # None = bleibt bei -c copy
+        global_audio_codec_short = "copy"   # 'flac' / 'mp3' / 'aac' / 'copy'
         if not self.include_video_checkbox.isChecked():
             fmt_idx = self.audio_format_combo.currentIndex()
-            audio_codec_map = {
-                0: None,           # Copy — kein Override
-                1: "flac",         # FLAC lossless
-                2: "libmp3lame",   # MP3
-                3: "aac",          # AAC
+            # Encoder-Name fuer FFmpeg vs. kurzer Codec-Name fuer unsere Logik
+            audio_encoder_map = {
+                0: (None,         "copy"),
+                1: ("flac",       "flac"),
+                2: ("libmp3lame", "mp3"),
+                3: ("aac",        "aac"),
             }
-            audio_codec = audio_codec_map.get(fmt_idx)
-            if audio_codec:
-                cmd.extend(["-c:a", audio_codec])
-                # FLAC: FFmpeg dekodiert AC-3/E-AC-3 intern zu 32-bit float.
-                # FLAC-32 wird von den meisten Playern NICHT unterstuetzt → kein Ton.
-                # s32 + bits_per_raw_sample 24 → 24-bit FLAC (lossless, breit unterstuetzt).
-                if audio_codec == "flac":
+            global_audio_encoder, global_audio_codec_short = \
+                audio_encoder_map.get(fmt_idx, (None, "copy"))
+            if global_audio_encoder:
+                cmd.extend(["-c:a", global_audio_encoder])
+                if global_audio_encoder == "flac":
+                    # FFmpeg dekodiert AC-3/E-AC-3 intern zu 32-bit float.
+                    # FLAC-32 wird von den meisten Playern NICHT unterstuetzt → kein Ton.
+                    # s32 + bits_per_raw_sample 24 → 24-bit FLAC (lossless, breit unterstuetzt).
                     cmd.extend(["-sample_fmt", "s32", "-bits_per_raw_sample", "24"])
+
+        # ---- Per-Track Downmix-Overrides ----
+        # Reihenfolge der Output-Audio-Streams: erst interne (in Auswahl-Reihenfolge),
+        # dann externe. Jeder Stream der downgemixt werden muss bekommt seinen
+        # eigenen -c:a:N / -ac:a:N / -b:a:N-Block — das ueberschreibt das globale
+        # -c copy oder -c:a CODEC fuer genau diesen Stream.
+        out_audio_idx = 0
+        for stream in selected_audio_streams:
+            ch = stream.get('channels')
+            if self._track_needs_downmix(ch):
+                # Ziel-Codec: bei Audio-only mit Format != Copy nehmen wir das Format,
+                # sonst (Video an oder Format=Copy) den Source-Codec und re-encoden ihn.
+                src_codec = (stream.get('codec_name') or '').lower()
+                if global_audio_codec_short != "copy":
+                    target_short = global_audio_codec_short
+                    target_encoder = global_audio_encoder
+                else:
+                    target_short = src_codec
+                    # Encoder-Mapping fuer Source-Codec-Re-encode
+                    target_encoder = {
+                        'ac3':  'ac3',
+                        'eac3': 'eac3',
+                        'aac':  'aac',
+                        'mp3':  'libmp3lame',
+                        'flac': 'flac',
+                    }.get(src_codec, src_codec)
+                cmd.extend([f"-c:a:{out_audio_idx}", target_encoder])
+                # Downmix-Filter: explizite ITU-/Cinema-Koeffizienten via pan,
+                # mit Fallback auf -ac N fuer ungewohnliche Source-Layouts.
+                pan_filter = self._build_downmix_filter(stream.get('channels'))
+                if pan_filter:
+                    cmd.extend([f"-filter:a:{out_audio_idx}", pan_filter])
+                else:
+                    cmd.extend([f"-ac:a:{out_audio_idx}",
+                                str(self._downmix_target_channels())])
+                if target_short == "flac":
+                    cmd.extend([f"-sample_fmt:a:{out_audio_idx}", "s32"])
+                else:
+                    br = self._downmix_target_bitrate(target_short, stream.get('bit_rate'))
+                    if br > 0:
+                        cmd.extend([f"-b:a:{out_audio_idx}", str(br)])
+            out_audio_idx += 1
+
+        # Externe Audio-Files — gleiche Logik, channels/bit_rate kommen aus dem entry-Dict
+        for entry in enabled_ext_audio:
+            ch = entry.get('channels')
+            if self._track_needs_downmix(ch):
+                src_codec = (entry.get('codec') or '').lower()
+                if global_audio_codec_short != "copy":
+                    target_short = global_audio_codec_short
+                    target_encoder = global_audio_encoder
+                else:
+                    target_short = src_codec
+                    target_encoder = {
+                        'ac3':  'ac3',
+                        'eac3': 'eac3',
+                        'aac':  'aac',
+                        'mp3':  'libmp3lame',
+                        'flac': 'flac',
+                    }.get(src_codec, src_codec)
+                cmd.extend([f"-c:a:{out_audio_idx}", target_encoder])
+                # Downmix-Filter (siehe interner Block) — Channels aus dem entry.
+                pan_filter = self._build_downmix_filter(entry.get('channels'))
+                if pan_filter:
+                    cmd.extend([f"-filter:a:{out_audio_idx}", pan_filter])
+                else:
+                    cmd.extend([f"-ac:a:{out_audio_idx}",
+                                str(self._downmix_target_channels())])
+                if target_short == "flac":
+                    cmd.extend([f"-sample_fmt:a:{out_audio_idx}", "s32"])
+                else:
+                    br = self._downmix_target_bitrate(target_short, entry.get('bit_rate'))
+                    if br > 0:
+                        cmd.extend([f"-b:a:{out_audio_idx}", str(br)])
+            out_audio_idx += 1
 
         # Apple Compatibility: HEVC tag von "hev1" auf "hvc1" aendern
         # (nur sinnvoll wenn Video tatsaechlich HEVC ist)
@@ -2633,11 +3088,14 @@ class RemuxDialog(QDialog):
             tags = stream.get('tags', {})
             lang = tags.get('language', 'und').upper()
             src_codec = stream.get('codec_name', '?').lower()
-            target_codec = self._target_audio_codec(src_codec)
+            src_channels = stream.get('channels')
+            target_codec = self._target_audio_codec(src_codec, src_channels)
             details = self._join_audio_details([
                 target_codec,
-                self._format_channels(stream.get('channels')),
-                self._target_audio_bitrate_label(stream.get('bit_rate')),
+                self._target_channel_label(src_channels),
+                self._target_audio_bitrate_label(
+                    stream.get('bit_rate'), target_codec, src_channels
+                ),
             ])
             out_inner.addWidget(self._make_stream_item(
                 f"#{idx} {lang} {details}", 'audio', True, self._browse_output
@@ -2651,8 +3109,16 @@ class RemuxDialog(QDialog):
             short_name = os.path.basename(entry["path"])
             if len(short_name) > 22:
                 short_name = short_name[:10] + "…" + short_name[-10:]
-            target_codec = self._target_audio_codec(entry['codec'])
-            label = f"ext: {short_name} ({target_codec})"
+            ext_channels = entry.get('channels')
+            target_codec = self._target_audio_codec(entry['codec'], ext_channels)
+            details = self._join_audio_details([
+                target_codec,
+                self._target_channel_label(ext_channels),
+                self._target_audio_bitrate_label(
+                    entry.get('bit_rate'), target_codec, ext_channels
+                ),
+            ])
+            label = f"ext: {short_name} {details}" if details else f"ext: {short_name}"
             out_inner.addWidget(self._make_stream_item(
                 label, 'audio', True, self._browse_output
             ))
@@ -2690,16 +3156,36 @@ class RemuxDialog(QDialog):
             )
             out_inner.addWidget(no_audio)
 
-        # Pfeil-Caption haengt vom Modus ab:
-        #   - Video an  → Remux (alles copy)
-        #   - Video aus + Copy → Audio extrahieren, kein Re-encode
-        #   - Video aus + FLAC/MP3/AAC → Audio extrahieren UND re-encoden
+        # Pfeil-Caption haengt vom Zustand ab — neue Matrix mit Downmix:
+        #   Video on  + Downmix off            → copy (no re-encode)        [reines Remux]
+        #   Video on  + Downmix on (any track) → copy video + downmix audio
+        #   Video off + Format=Copy + Downmix off → extract audio (no re-encode)
+        #   Video off + Format=Copy + Downmix on  → extract audio + downmix
+        #   Video off + Format!=Copy + Downmix off → extract audio + re-encode
+        #   Video off + Format!=Copy + Downmix on  → extract audio + downmix + re-encode
+        # "any track downmixed" = mindestens ein selektierter Track Source-Channels > Target.
+        any_downmix = any(
+            self._track_needs_downmix(s.get('channels'))
+            for cb, s in self.audio_track_checkboxes if cb.isChecked()
+        ) or any(
+            self._track_needs_downmix(e.get('channels'))
+            for e in self.external_audio_files if e.get('enabled', True)
+        )
         if video_included:
-            arrow_caption = "copy<br>(no re-encode)"
-        elif self.audio_format_combo.currentIndex() == 0:
-            arrow_caption = "extract audio<br>(no re-encode)"
+            arrow_caption = (
+                "copy video<br>+ downmix audio" if any_downmix
+                else "copy<br>(no re-encode)"
+            )
         else:
-            arrow_caption = "extract audio<br>+ re-encode"
+            audio_copy = self.audio_format_combo.currentIndex() == 0
+            if audio_copy and not any_downmix:
+                arrow_caption = "extract audio<br>(no re-encode)"
+            elif audio_copy and any_downmix:
+                arrow_caption = "extract audio<br>+ downmix"
+            elif not audio_copy and not any_downmix:
+                arrow_caption = "extract audio<br>+ re-encode"
+            else:
+                arrow_caption = "extract audio<br>+ downmix<br>+ re-encode"
 
         # Layout zusammenbauen
         self.diagram_layout.addWidget(src_frame, 0, Qt.AlignmentFlag.AlignTop)
@@ -2776,6 +3262,44 @@ MKV but lights up as Dolby Vision in MP4.</p>
       (MP4's native subtitle format). Picture-based subs (PGS, DVB) cannot be muxed
       and are disabled in the list.</li>
 </ul>
+
+<h3>Audio-only extraction</h3>
+<p>Uncheck <b>Include Video</b> to extract audio only — output extension switches
+automatically to <code>.mka</code> (Copy) or the format-specific extension
+(<code>.flac</code>, <code>.mp3</code>, <code>.m4a</code>) when re-encoding.</p>
+<ul>
+  <li><b>Copy (keep original codec)</b>: fastest, no quality loss, container-only swap.</li>
+  <li><b>FLAC (lossless)</b>: 24-bit re-encode. Internal math runs in 32-bit float —
+      no resolution loss from the decode/encode round-trip beyond the source's own limits.</li>
+  <li><b>MP3 / AAC</b>: lossy re-encode at FFmpeg defaults; best for compatibility.</li>
+</ul>
+
+<h3>Multi-channel downmix</h3>
+<p>Tick <b>Downmix audio to:</b> to fold surround tracks into stereo (or 7.1 → 5.1).
+Choose <b>Music</b> or <b>Movie</b> mode based on source material — the mix
+coefficients differ:</p>
+
+<p><b>Music mode</b> (default) — full ITU-R BS.775 weighted mix:</p>
+<pre style="background: #f0f0f0; padding: 6px; border: 1px solid #ddd; font-size: 9pt;">
+L_out = FL + 0.707·FC + 0.707·SL + 0.707·LFE  → volume −3 dB (clipping safety)
+R_out = FR + 0.707·FC + 0.707·SR + 0.707·LFE  → volume −3 dB
+</pre>
+<p>Preserves bass energy and dynamics — best for multi-channel music releases
+(Blu-ray Audio, SACD rips, surround music). LFE is fully integrated since
+on music releases it's typically a discrete bass channel, not an effect channel.</p>
+
+<p><b>Movie mode</b> — conservative cinema downmix:</p>
+<pre style="background: #f0f0f0; padding: 6px; border: 1px solid #ddd; font-size: 9pt;">
+L_out = FL + 0.707·FC + 0.5·SL + 0.316·LFE
+R_out = FR + 0.707·FC + 0.5·SR + 0.316·LFE
+</pre>
+<p>Center stays at −3 dB for dialogue clarity, surrounds pulled back to −6 dB
+so effects don't overwhelm the front mix, LFE attenuated to −10 dB to keep
+action-bass under control. Standard cinema downmix levels.</p>
+
+<p><b>Per-track logic:</b> Only tracks whose source channels exceed the target are
+re-encoded. A stereo track in the same selection stays as Copy. Mixed
+selections work without manual intervention.</p>
 
 <h3>Audio codec compatibility</h3>
 <table>
@@ -5247,6 +5771,11 @@ class FFmpegGUI(QMainWindow):
         self.current_theme = stored_theme
         self._refresh_theme_btn()
 
+        # Downmix-Mode aus Settings (Music/Movie). Default ist 'music'.
+        # Wird vom Remux-Dialog beim Aufbau gelesen.
+        stored_downmix = settings.get('downmix_mode', 'music')
+        self.last_downmix_mode = stored_downmix if stored_downmix in ('music', 'movie') else 'music'
+
         # werden. setup_ui() lief vorher mit dem Default THEME_LIGHT und hat den
         # hellen Idle-Stil angewendet. Wenn das gespeicherte Theme tatsaechlich
         # DARK ist, passt der Stil nicht mehr zur Palette - im Bild war es
@@ -5345,6 +5874,9 @@ class FFmpegGUI(QMainWindow):
 
             # NEW: Theme-Wahl (light/dark)
             'theme': self.current_theme,
+
+            # Downmix-Mode-Memory (Music/Movie) — bleibt zwischen App-Starts erhalten
+            'downmix_mode': getattr(self, 'last_downmix_mode', 'music'),
         }
         try:
             with open(self.settings_path, 'w') as f:
@@ -6360,7 +6892,10 @@ class FFmpegGUI(QMainWindow):
                  "Container-only conversion preserving Dolby Vision &amp; HDR metadata; "
                  "interactive workflow diagram, per-track audio/subtitle selection, "
                  "external audio/subtitle file support (multi-input), "
-                 "Apple-compatible HEVC tagging (hvc1)") +
+                 "Apple-compatible HEVC tagging (hvc1); "
+                 "audio-only extraction with FLAC / MP3 / AAC re-encode; "
+                 "weighted multi-channel downmix (7.1/5.1 → 5.1/2.0) with "
+                 "Music / Movie mode (ITU-R BS.775 vs cinema-balanced coefficients)") +
             item("📂 Recursive Batch",
                  "Folder trees; skipped files logged in Message.log") +
             item("🎵 Dolby Atmos Auto-Protection",
