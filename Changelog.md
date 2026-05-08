@@ -1,5 +1,10 @@
 # 📝 CHANGELOG - FFmpeg Converter GUI
 
+> **ℹ️ Maintenance notice:** Only the **v3.0 line** is actively maintained going
+> forward. Earlier versions (v2.x, v1.x) are kept here for historical reference
+> only and will not receive bug fixes or feature updates. Please upgrade to the
+> latest v3.0.x release.
+
 ---
 
 ## Version 3.0.2 (2026-05-08) — Subtitle handling & batch-timing hotfix
@@ -8,56 +13,61 @@ Focused bugfix release. Addresses a crash that hit certain MKV files during batc
 
 ---
 
-## Version 2.6 (2026) — PySide6 Migration & Dark Mode
+## Version 2.6 (2026) — PySide6 migration & dark mode
+
+> *Historical entry — no longer maintained.*
 
 ### 🎉 NEW FEATURES
 
-#### 🌙 Dark Mode
-**Live-Wechsel zwischen hellem und dunklem Theme** — kein Restart nötig.
+#### 🌙 Dark mode
+**Live switching between light and dark themes** — no restart required.
 
 **Components:**
-- ✅ Icon-Toggle-Button (☾ / ☀) in den Advanced Settings, links vom "Default"-Button
-- ✅ Wahl wird in `Converter_settings.json` persistiert (Key `theme`)
-- ✅ Dark-Mode nutzt Fusion-Style + explizite `QPalette` — robust unter Windows
-  (der native `windowsvista`-Style ignoriert Palette-Änderungen zur Laufzeit z.T.)
-- ✅ Light-Mode kehrt zum nativen Windows-Style zurück, damit das UI dort
-  "nativ" aussieht und nicht nach Fusion-Reskin
-- ✅ Theme wird beim App-Start direkt aus den Settings gelesen, bevor das
-  MainWindow gebaut wird (kein Aufflackern)
+- ✅ Icon toggle button (☾ / ☀) in the Advanced Settings, to the left of the "Default" button
+- ✅ Choice is persisted in `Converter_settings.json` (key `theme`)
+- ✅ Dark mode uses Fusion style + an explicit `QPalette` — robust on Windows
+  (the native `windowsvista` style partially ignores palette changes at runtime)
+- ✅ Light mode reverts to the native Windows style so the UI looks
+  "native" there rather than a Fusion reskin
+- ✅ Theme is read from settings at app start, before the
+  MainWindow is built (no flicker)
 
-#### 🔀 Framework-Migration: PyQt6 → PySide6
-Identisches Verhalten, aber LGPL statt GPL — kompatibler für kommerzielle
-Distribution.
+#### 🔀 Framework migration: PyQt6 → PySide6
+Identical behaviour, but LGPL instead of GPL — better suited for commercial
+distribution.
 
+---
 
-### Reporting Issues
+## 📞 SUPPORT
+
+### Reporting issues
 - Check this CHANGELOG for known issues
-- Review documentation for your version
-- Test with latest version first
-- Provide: OS, FFmpeg version (`ffmpeg -version`), Input file details (MediaInfo)
+- Review the documentation for your version
+- Test with the latest v3.0.x release first — older versions are no longer maintained
+- Provide: OS, FFmpeg version (`ffmpeg -version`), input file details (MediaInfo)
 
-### Feature Requests
-- Check ROADMAP first
-- Describe use-case clearly
-- Provide example workflow
+### Feature requests
+- Check the ROADMAP first
+- Describe the use case clearly
+- Provide an example workflow
 
 ---
 
 ## 📄 LICENSE
 
-**Freeware** - Free for personal and commercial use
+**Freeware** — free for personal and commercial use
 
 **Dependencies:**
 - FFmpeg: GPL/LGPL (see ffmpeg.org)
 - PySide6: LGPL v3 (Qt for Python)
 - Python: PSF License
 - psutil: BSD-3-Clause
-- Nuitka: Apache 2.0 (Build-Time only)
+- Nuitka: Apache 2.0 (build-time only)
 
 ---
 
-**Current Version:** 2.6 & 3.02
-**Release Date:** 2026
-**Status:** ✅ Production Ready
+**Current Version:** 3.0.2
+**Release Date:** 2026-05-08
+**Status:** ✅ Production Ready (v3.0 line — sole maintained branch)
 **Author:** Silvestar Friedrich
 **FFmpeg Requirement:** 8.0+
