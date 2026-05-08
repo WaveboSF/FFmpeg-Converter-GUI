@@ -56,7 +56,7 @@ Distribution.
 
 ---
 
-**Current Version:** 2.6
+**Current Version:** 2.6 & 3.02
 **Release Date:** 2026
 **Status:** ✅ Production Ready
 **Author:** Silvestar Friedrich
