@@ -2,6 +2,14 @@
 
 ---
 
+## Version 3.0.3 (2026-05-09) — Non-blocking batch errors
+
+Removes the blocking `Batch Error` dialog that interrupted long-running batches whenever FFmpeg returned a non-zero exit code. The dialog stopped the batch and waited for a user click, which was catastrophic for unattended over-night runs — one broken file would freeze the queue for hours. The error path now logs to console, appends an `ERROR` block to a `Message.log` next to the failing input file (input/output/return code/last 30 lines of FFmpeg output), increments a new `batch_failed_count`, and continues with the next file. The end-of-batch toast distinguishes three buckets — `encoded`, `skipped`, `failed` — so a batch that finished with errors is visually flagged with `⚠️ Batch complete with errors` rather than the green checkmark. The pre-existing v3.0.2 subtitle auto-retry path is unchanged; this fix catches everything that retry doesn't (other FFmpeg errors, or the retry itself failing). The configuration-issue dialog in `process_single_file` (invalid output filename extension) is intentionally left as a hard stop, because it would affect every file in the batch identically.
+
+`build_nuitka.bat` and `build_nuitka_onefile.bat` bumped to `--file-version=3.0.3.0` / `--product-version=3.0.3.0`.
+
+---
+
 ## Version 3.0.2 (2026-05-08) — Subtitle-handling & large-file hotfix
 
 Focused bugfix release covering two unrelated issues:
